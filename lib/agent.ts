@@ -1,6 +1,15 @@
 import { chatJSON, ModelDeclinedError } from "./llm";
 import { tavilyExtract, tavilySearch, type SearchHit } from "./tavily";
-import { extractUrls, hostOf, keywords, quoteAppearsIn, relevanceScore, relevantExcerpt } from "./text";
+import {
+  cleanQuote,
+  extractUrls,
+  hostOf,
+  keywords,
+  quoteAppearsIn,
+  relevanceScore,
+  relevantExcerpt,
+  unsupportedNumbers,
+} from "./text";
 
 const MAX_ROUNDS = 2;
 const PAGES_PER_ROUND = 4;
@@ -52,6 +61,7 @@ type Assessed = {
   confidence: Confidence;
   evidence: Evidence[];
   droppedQuotes: number;
+  unsupported: string[]; // numbers in the answer that no evidence quote contains
   followUpQueries: string[];
   followUpDomain: string | null;
   sources: Source[];
@@ -258,7 +268,7 @@ export async function* runAgent(question: string, signal?: AbortSignal): AsyncGe
 
     // ---- 5. Verify quotes against the real page text ---------------------
     yield { type: "step", stage: "verify", message: "Checking quotes against the page text" };
-    const assessed = assess(raw, ranked);
+    const assessed = assess(raw, ranked, question);
     assessments.push(assessed);
 
     if (assessed.found && assessed.evidence.length > 0) break;
@@ -323,7 +333,7 @@ async function searchAll(
   return hits;
 }
 
-function assess(raw: RawAnswer, ranked: Doc[]): Assessed {
+function assess(raw: RawAnswer, ranked: Doc[], question: string): Assessed {
   const sources: Source[] = ranked.map((d, i) => ({ id: i + 1, title: d.title, url: d.url }));
   const claimedFound = raw.found === true;
   const answer = typeof raw.answer === "string" ? raw.answer.trim() : "";
@@ -339,7 +349,7 @@ function assess(raw: RawAnswer, ranked: Doc[]): Assessed {
         continue;
       }
       if (quoteAppearsIn(e.quote, doc.content)) {
-        evidence.push({ source: e.source as number, quote: e.quote.trim() });
+        evidence.push({ source: e.source as number, quote: cleanQuote(e.quote) });
       } else {
         droppedQuotes++;
       }
@@ -349,12 +359,18 @@ function assess(raw: RawAnswer, ranked: Doc[]): Assessed {
   const modelConfidence: Confidence =
     raw.confidence === "high" || raw.confidence === "medium" || raw.confidence === "low" ? raw.confidence : "medium";
 
+  const unsupported = evidence.length > 0 ? unsupportedNumbers(answer, evidence.map((e) => e.quote), question) : [];
+  // A figure the quotes don't contain means the answer goes beyond its proof.
+  const confidence: Confidence =
+    evidence.length === 0 ? "low" : unsupported.length > 0 && modelConfidence === "high" ? "medium" : modelConfidence;
+
   return {
     found: claimedFound && answer.length > 0,
     answer,
-    confidence: evidence.length === 0 ? "low" : modelConfidence,
+    confidence,
     evidence,
     droppedQuotes,
+    unsupported,
     followUpQueries: strings(raw.follow_up_queries, 2),
     followUpDomain: cleanDomain(raw.follow_up_domain),
     sources,
@@ -382,6 +398,9 @@ function finalize(assessments: Assessed[]): AgentResult {
   const notes: string[] = [];
   if (!best.found) notes.push("The sources I checked did not contain this information.");
   else if (best.evidence.length === 0) notes.push("The supporting quote could not be verified in the page text, so treat this answer with caution.");
+  if (best.found && best.unsupported.length > 0) {
+    notes.push(`The answer mentions ${best.unsupported.join(", ")}, which the quoted evidence doesn't contain. Check the sources before relying on it.`);
+  }
   if (best.droppedQuotes > 0 && best.evidence.length > 0) {
     notes.push(`${best.droppedQuotes} quote${best.droppedQuotes === 1 ? "" : "s"} could not be verified and ${best.droppedQuotes === 1 ? "was" : "were"} left out.`);
   }

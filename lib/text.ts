@@ -25,6 +25,26 @@ export function quoteAppearsIn(quote: string, content: string): boolean {
   return normalize(content).includes(q);
 }
 
+// Pages are fetched as markdown; strip emphasis markers so quotes read cleanly.
+export function cleanQuote(quote: string): string {
+  return quote
+    .replace(/\*\*|__|`/g, "")
+    .replace(/(^|\s)[_*]([^_*\n]+)[_*](?=[\s.,;:!?)]|$)/g, "$1$2")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function numberTokens(text: string): string[] {
+  return (text.match(/\d+(?:[.,]\d+)*/g) ?? []).map((n) => n.replace(/,/g, ""));
+}
+
+// Numbers stated in the answer that appear neither in the evidence quotes nor in
+// the question. A figure the quotes don't contain is a sign of an unsupported claim.
+export function unsupportedNumbers(answer: string, quotes: string[], question: string): string[] {
+  const supported = new Set(numberTokens(`${quotes.join(" ")} ${question}`));
+  return [...new Set(numberTokens(answer))].filter((n) => !supported.has(n));
+}
+
 export function relevanceScore(content: string, terms: string[]): number {
   const lower = content.toLowerCase();
   let hits = 0;
